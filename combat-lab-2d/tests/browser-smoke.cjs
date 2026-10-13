@@ -4,9 +4,9 @@
 // Optional integration checks. Uses Playwright and an existing Chromium browser;
 // the prototype itself has no runtime dependencies.
 const assert = require("node:assert/strict");
-const { createServer } = require("node:http");
-const { readFile } = require("node:fs/promises");
+const { spawn } = require("node:child_process");
 const { existsSync } = require("node:fs");
+const { tmpdir } = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
@@ -25,35 +25,52 @@ try {
 const root = path.resolve(__dirname, "..");
 const startTime = new Date("2026-01-01T12:00:00Z");
 const results = { passed: 0, skipped: 0 };
-const mediaTypes = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".svg": "image/svg+xml",
-};
+
+async function stopServer(child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise((resolve) => {
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 2000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
+}
 
 async function serve() {
-  const server = createServer(async (request, response) => {
-    try {
-      const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
-      const filename = path.resolve(root, `.${pathname === "/" ? "/index.html" : pathname}`);
-      if (!filename.startsWith(root + path.sep)) {
-        response.writeHead(403).end();
-        return;
-      }
-      const contents = await readFile(filename);
-      response.writeHead(200, {
-        "Content-Type": mediaTypes[path.extname(filename)] || "application/octet-stream",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'",
-        "X-Content-Type-Options": "nosniff",
-      });
-      response.end(contents);
-    } catch {
-      response.writeHead(404).end();
-    }
+  // Exercise the documented launcher itself. Running from another directory
+  // catches accidental dependence on the caller's current working directory.
+  const child = spawn(process.env.COMBAT_LAB_PYTHON || "python3", [path.join(root, "serve.py"), "--port", "0"], {
+    cwd: tmpdir(),
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, url: `http://127.0.0.1:${server.address().port}/` };
+  let output = "";
+  let errors = "";
+  child.stderr.on("data", (chunk) => { errors = (errors + chunk).slice(-8192); });
+  try {
+    const url = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`Combat Lab launcher did not become ready. ${errors}`)), 10000);
+      const fail = (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      };
+      child.once("error", fail);
+      child.once("exit", (code, signal) => fail(new Error(`Combat Lab launcher exited before startup (${signal || code}). ${errors}`)));
+      child.stdout.on("data", (chunk) => {
+        output = (output + chunk).slice(-8192);
+        const ready = output.match(/^Combat Lab: (http:\/\/127\.0\.0\.1:\d+\/)\r?$/m);
+        if (ready) {
+          clearTimeout(timeout);
+          resolve(ready[1]);
+        }
+      });
+    });
+    return { server: { close: () => stopServer(child) }, url };
+  } catch (error) {
+    await stopServer(child);
+    throw error;
+  }
 }
 
 async function health(page) {
@@ -92,6 +109,7 @@ async function main() {
     page.on("requestfailed", (request) => failedRequests.push({ url: request.url(), error: request.failure()?.errorText }));
     page.on("response", (response) => responses.push({
       url: response.url(), status: response.status(), type: response.headers()["content-type"],
+      csp: response.headers()["content-security-policy"], nosniff: response.headers()["x-content-type-options"],
     }));
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
@@ -237,13 +255,26 @@ async function main() {
         assert.ok(response, `${asset} loaded`);
         assert.equal(response.status, 200, `${asset} returned HTTP 200`);
         assert.match(response.type, type, `${asset} uses its proper MIME type`);
+        assert.equal(response.nosniff, "nosniff", `${asset} disallows MIME sniffing`);
       }
+      const documentResponse = responses.find((entry) => new URL(entry.url).pathname === "/");
+      assert.equal(documentResponse.csp, "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'",
+        "the actual launcher serves the application with strict CSP");
       assert.equal(await page.locator("script:not([src])").count(), 0, "the application contains no inline script blocks");
       assert.ok(requests.every((requestUrl) => new URL(requestUrl).origin === new URL(url).origin), "all requests stay on the local server");
       assert.ok(responses.every((response) => response.status === 200), "all resources load successfully");
       assert.deepEqual(failedRequests, [], "no blocked or failed network requests");
       assert.deepEqual(consoleErrors, [], "no browser console errors");
       assert.deepEqual(await page.evaluate(() => globalThis.policyViolations), [], "no CSP violations");
+    });
+
+    await check("missing JavaScript returns an honest HTML 404, never XML or executable JavaScript", async () => {
+      const response = await context.request.get(new URL("missing-combat-script.js", url).href);
+      assert.equal(response.status(), 404);
+      assert.match(response.headers()["content-type"], /^text\/html(?:;|$)/);
+      assert.equal(response.headers()["x-content-type-options"], "nosniff");
+      assert.match(await response.text(), /404/);
+      await response.dispose();
     });
 
     await check("opening index.html directly also starts automatic combat", async () => {
@@ -273,7 +304,7 @@ async function main() {
     await context.close();
   } finally {
     if (browser) await browser.close();
-    await new Promise((resolve) => server.close(resolve));
+    await server.close();
   }
 }
 

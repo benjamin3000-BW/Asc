@@ -32,14 +32,25 @@ Implemented: Davit, Adrian Seo, and Cook automatically attack three basic enemie
 
 ### Launch
 
-No build step, backend, account, or runtime dependency is required. Open `combat-lab-2d/index.html` in a modern browser, or serve this folder locally:
+No build step, backend, account, or browser runtime dependency is required. To run the complete application over HTTP, use Python 3 and the included launcher. From the Asc repository root:
 
 ```sh
-cd /workspace/Asc/combat-lab-2d
-python3 -m http.server 8000 --bind 127.0.0.1
+git switch feature/combat-lab-2d
+git pull --ff-only origin feature/combat-lab-2d
+python3 combat-lab-2d/serve.py
 ```
 
-Then open `http://127.0.0.1:8000` in your local browser. Outside this cloud checkout, use the corresponding path to `combat-lab-2d`. Stop the server with Ctrl+C. The cloud onboarding UI does not provide a localhost web preview.
+Then open `http://127.0.0.1:8000/` in a normal browser tab. Stop the server with Ctrl+C. If port 8000 is occupied, add `--port 8001` and use the URL printed by the launcher. In this cloud checkout, the repository root is `/workspace/Asc`; `python3 /workspace/Asc/combat-lab-2d/serve.py` also works from any directory.
+
+The launcher always serves the folder containing itself, checks that every required application asset exists, and explicitly returns JavaScript as `text/javascript` and CSS as `text/css`. It does not depend on your shell's working directory or host MIME database. It also serves a strict Content Security Policy without permitting inline scripts. The cloud onboarding UI does not provide a localhost web preview.
+
+Alternatively, opening `combat-lab-2d/index.html` directly works in browsers that allow local-file scripts; this cloud machine's managed Chromium policy blocks file URLs, so use HTTP here. For a plain Python static server, explicitly set the directory:
+
+```sh
+python3 -m http.server 8000 --bind 127.0.0.1 --directory /workspace/Asc/combat-lab-2d
+```
+
+Use your own checkout path outside the cloud environment. Do not serve or upload `index.html` alone: `combat.js`, `game.js`, `styles.css`, and `favicon.svg` must be available alongside it.
 
 ### Play
 
@@ -73,7 +84,7 @@ npx playwright install chromium
 node tests/browser-smoke.cjs
 ```
 
-If using an existing Chromium installation, skip the download and set `CHROMIUM_PATH` to its executable when running the browser checks. The runner serves the project on a temporary local port, closes its own server/browser on completion, and also tests opening `index.html` directly.
+If using an existing Chromium installation, skip the download and set `CHROMIUM_PATH` to its executable when running the browser checks. Python 3 is also required for these integration checks; optionally set `COMBAT_LAB_PYTHON` to its executable. The runner launches the actual `serve.py` from an unrelated working directory on a temporary local port, closes its own server/browser on completion, and also tests opening `index.html` directly.
 
 ### Balance and implementation
 
@@ -83,7 +94,7 @@ Combat resolves every due attack in simulation time order. Simultaneous attacks 
 
 ### Tested behavior and limitations
 
-The 18 logic tests pass, covering automatic attacks, enemy targeting, priority/fallback targeting, paused and terminal states, fresh restart state, independent battles, large and partitioned time steps, and victory/defeat strategies. Nine Chromium browser checks pass for static-server launch, automatic damage, all three specialists, health bars, mouse/keyboard targeting, pause/resume, restart, both outcomes, terminal freeze, a narrow viewport, and strict-CSP asset loading. One direct-file check is skipped in this cloud machine because managed Chromium blocks `file://` navigation (`ERR_BLOCKED_BY_ADMINISTRATOR`); use the static server here. Other browser engines have not been verified.
+The 18 logic tests pass, covering automatic attacks, enemy targeting, priority/fallback targeting, paused and terminal states, fresh restart state, independent battles, large and partitioned time steps, and victory/defeat strategies. Ten Chromium browser checks pass for the actual launcher started from another directory, automatic damage, all three specialists, health bars, mouse/keyboard targeting, pause/resume, restart, both outcomes, terminal freeze, a narrow viewport, strict-CSP asset loading, and proper 404 handling. One direct-file check is skipped in this cloud machine because managed Chromium blocks `file://` navigation (`ERR_BLOCKED_BY_ADMINISTRATOR`); use the static server here. Other browser engines have not been verified.
 
 This is one deterministic training encounter with simple geometric portraits. Cook auto-attacks in Milestone 1; healing, buffs, protection, disruption abilities, and their cooldowns belong to Milestone 2. Vitality, Endurance, persistent Capacity, rest, recovery, roster preparation, Containment, and the boss are not implemented yet. There is no saved progression or random variation. The broader acceptance criteria in the implementation brief span those later milestones.
 
@@ -91,6 +102,8 @@ This is one deterministic training encounter with simple geometric portraits. Co
 
 Use the local HTTP launch above to diagnose an embedded preview that stays at `00:00` with empty teams. The application entry point is `index.html`; there is no `runner.html` in this project. Scripts are loaded from `combat.js` and `game.js`, and styling from `styles.css`, with no inline script blocks, inline event handlers, external libraries, remote fonts, or gameplay network requests. Static display styles also live in the stylesheet.
 
-Standalone Chromium against the documented Python server renders all six cards, advances the clock, and produces combat events with no console errors or failed requests. `styles.css` responds with HTTP 200 and `text/css`; both JavaScript files respond with HTTP 200 and `text/javascript`. A stylesheet response of `text/html` in another preview indicates that its route is returning an HTML wrapper or error page instead of this CSS file. Serve the entire `combat-lab-2d` directory so the relative asset URLs resolve together.
+Standalone Chromium against the documented Python server renders all six cards, advances the clock, and produces combat events with no console errors or failed requests. `styles.css` responds with HTTP 200 and `text/css`; both JavaScript files respond with HTTP 200 and `text/javascript`. A JavaScript URL returning HTTP 404 and `application/xml` is an error document, not the game's JavaScript; changing a script tag's `type` cannot repair a missing resource. A stylesheet response of `text/html` similarly indicates an HTML wrapper or error page. Serve the entire `combat-lab-2d` directory so the relative asset URLs resolve together.
 
-The reported CSP violation in `runner.html` belongs to the embedded preview wrapper, which is outside this repository. Its exact blocked request URLs and response bodies were not available for inspection here. No such failure occurs when serving the game directly. The browser suite also serves the game with a restrictive policy permitting only same-origin scripts/styles and denying connections, and checks for CSP violations and asset-loading errors. Do not add `unsafe-inline` or disable the preview's security policy to make this game run.
+The follow-up investigation found the application files tracked in local commit `c98df38`, while the remote feature branch was still at scaffold commit `c3072ec`, which contained none of the application files. A branch-based consumer of that older commit cannot load these assets. Check that your checkout or preview artifact includes the implementation commits and all sibling files. A remote preview may instead have uploaded only HTML; its exact request URLs are needed to distinguish those delivery problems.
+
+The reported CSP violation in `runner.html` belongs to the embedded preview wrapper, which is outside this repository. Its exact blocked request URLs and response bodies were not available for inspection here. No such failure occurs when serving the game directly. The browser suite uses the actual launcher, whose restrictive policy permits only same-origin scripts/styles and denies connections, and checks for CSP violations and asset-loading errors. Do not add `unsafe-inline` or disable the preview's security policy to make this game run.
